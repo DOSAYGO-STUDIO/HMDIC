@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>How Much Did It Cost? – AI Build Estimator</title>
+  <style>
+    :root {
+      --bg: #0b0c10;
+      --surface: #1f2833;
+      --primary: #66fcf1;
+      --secondary: #45a29e;
+      --text: #c5c6c7;
+      --danger: #ff4b4b;
+    }
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 900px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      background: var(--bg);
+      color: var(--text);
+    }
+    h1 { text-align: center; color: var(--primary); font-weight: 800; margin-bottom: 0.5rem; }
+    .subtitle { text-align:center; color: #888; margin-top: 0; margin-bottom: 2rem; font-size: 0.95rem;}
+    
+    .input-group { display: flex; gap: 0.5rem; margin: 1.5rem 0; }
+    input[type="text"] {
+      flex: 1; padding: 1rem; font-size: 1.1rem; border: 1px solid #333;
+      border-radius: 8px; background: #111; color: white;
+    }
+    button {
+      padding: 1rem 1.5rem; font-size: 1.1rem; font-weight: bold;
+      background: var(--primary); color: var(--bg); border: none;
+      border-radius: 8px; cursor: pointer; transition: all 0.2s;
+    }
+    button:hover { background: var(--secondary); color: white; }
+
+    /* Settings Panel */
+    .settings-panel {
+      background: var(--surface); padding: 1rem 1.5rem; border-radius: 8px;
+      margin-bottom: 2rem; border: 1px solid #333;
+    }
+    .settings-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-top: 1rem;
+    }
+    .setting-item label { display: block; font-size: 0.85rem; margin-bottom: 0.4rem; color: #aaa; }
+    .setting-item input { width: 100%; padding: 0.6rem; background: #111; border: 1px solid #444; color: #fff; border-radius: 4px; box-sizing: border-box;}
+
+    #loading { display: none; text-align: center; font-style: italic; color: var(--secondary); margin: 1rem 0; }
+    .section { margin-bottom: 2.5rem; background: var(--surface); padding: 1.5rem; border-radius: 8px; }
+    .section h2, .section h3 { margin-top: 0; color: white; border-bottom: 1px solid #333; padding-bottom: 0.5rem; }
+    
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; font-size: 0.95rem; }
+    th, td { padding: 0.8rem; text-align: left; border-bottom: 1px solid #333; }
+    th { color: var(--primary); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.5px; }
+    
+    .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-top: 1rem; }
+    .metric-card { background: #111; padding: 1rem; border-radius: 6px; text-align: center; border: 1px solid #333; }
+    .metric-value { font-size: 1.6rem; font-weight: bold; color: var(--primary); margin-top: 0.5rem; }
+    
+    .note { font-size: 0.85rem; color: #777; margin-top: 1.5rem; text-align: center; line-height: 1.4; }
+    .error { color: var(--danger); text-align: center; margin: 1rem 0; font-weight: bold; }
+  </style>
+</head>
+<body>
+
+  <h1>How Much Did It Cost?</h1>
+  <p class="subtitle">Simulated 2026 AI Dev Pricing (Adjusted for Model "Intelligence")</p>
+
+  <div class="input-group">
+    <input id="repoUrl" type="text" placeholder="https://github.com/owner/repo" value="https://github.com/facebook/react" />
+    <button onclick="estimate()">Run Estimation</button>
+  </div>
+
+  <details class="settings-panel">
+    <summary style="cursor: pointer; color: var(--primary); font-weight: bold;">⚙️ Agent Behavior Model (Click to tweak)</summary>
+    <div class="settings-grid">
+      <div class="setting-item">
+        <label title="Base prompt retries needed for a 65% SWE-Bench model">Base Iterations/Commit</label>
+        <input id="setIters" type="number" value="3.0" step="0.5" />
+      </div>
+      <div class="setting-item">
+        <label title="% of codebase passed to LLM via RAG">Context Included (%)</label>
+        <input id="setContextPct" type="number" value="15" step="1" />
+      </div>
+      <div class="setting-item">
+        <label title="Multiplier for rewritten/deleted code over project lifetime">Code Churn Factor</label>
+        <input id="setChurn" type="number" value="1.5" step="0.1" />
+      </div>
+      <div class="setting-item">
+        <label title="Hard cap on context size per prompt">Max Context Lines</label>
+        <input id="setMaxLines" type="number" value="25000" step="1000" />
+      </div>
+    </div>
+  </details>
+
+  <div id="loading">Cloning codebase telemetry & calculating stupidity taxes...</div>
+  <div id="result"></div>
+  <div id="error" class="error"></div>
+
+  <script>
+    const GITHUB_API_BASE = 'https://api.github.com';
+    const USER_AGENT = 'AI-Cost-Estimator/3.0';
+    
+    const TOKENS_PER_LINE = 10; 
+    const BASE_PROMPT_TOKENS = 400; // System prompt overhead
+    const BASELINE_SWE_BENCH = 65;  // The anchor % used for the user's "Base Iterations"
+
+    // Accurate mapping of avg bytes per line of code to generate real SLOC
+    const BYTES_PER_LINE = {
+      'JavaScript': 35, 'TypeScript': 35, 'Python': 28, 'Java': 45,
+      'C': 30, 'C++': 35, 'C#': 40, 'Go': 25, 'Rust': 30,
+      'HTML': 40, 'CSS': 30, 'Ruby': 25, 'PHP': 35, 'Swift': 35,
+      'Kotlin': 40, 'Shell': 30, 'Objective-C': 40, 'Dart': 35,
+      'Vue': 35, 'Svelte': 35, 'default': 35
+    };
+
+    // 2026 Models with Simulated Capabilities
+    const PROVIDERS =[
+      { name: 'Anthropic Opus 4.6',    input: 10.00, output: 40.00, sweBench: 85 }, // Very smart -> fewer retries
+      { name: 'OpenAI Codex 5.3',      input: 3.00,  output: 15.00, sweBench: 75 },
+      { name: 'Google Gemini 3.1 Pro', input: 2.50,  output: 10.00, sweBench: 65 }, // Baseline
+      { name: 'xAI Grok 4.1 Fast',     input: 0.50,  output: 2.00,  sweBench: 40 }  // Dumb -> heavy iteration penalty
+    ];
+
+    const SUB_PLANS =[
+      { name: 'GitHub Copilot Pro', monthly: 20 },
+      { name: 'Cursor Enterprise',  monthly: 40 },
+      { name: 'Devin Standard',     monthly: 500 }
+    ];
+
+    async function estimate() {
+      const urlInput = document.getElementById('repoUrl').value.trim();
+      const loading  = document.getElementById('loading');
+      const resultEl = document.getElementById('result');
+      const errorEl  = document.getElementById('error');
+
+      resultEl.innerHTML = '';
+      errorEl.textContent = '';
+      loading.style.display = 'block';
+
+      try {
+        const { owner, repo } = parseGitHubUrl(urlInput);
+        const [totalCommits, langBytes] = await Promise.all([
+          getTotalCommits(owner, repo),
+          getLanguageBytes(owner, repo)
+        ]);
+
+        const finalLoc = estimateWeightedLoC(langBytes);
+        
+        // Settings
+        const baseIters      = parseFloat(document.getElementById('setIters').value);
+        const contextPct     = parseFloat(document.getElementById('setContextPct').value) / 100;
+        const churnFactor    = parseFloat(document.getElementById('setChurn').value);
+        const maxContextLines= parseFloat(document.getElementById('setMaxLines').value);
+
+        // Calculate custom progression per model based on their intelligence
+        const apiResults = PROVIDERS.map(p => {
+          // The Stupidity Tax: Lower SWE-Bench score = more iterations per commit
+          const modelIters = baseIters * (BASELINE_SWE_BENCH / p.sweBench);
+          
+          const { inputTokens, outputTokens } = calculateTokensOverTime(
+            finalLoc, totalCommits, modelIters, contextPct, churnFactor, maxContextLines
+          );
+
+          const totalTokens = inputTokens + outputTokens;
+          const cost = ((inputTokens / 1_000_000) * p.input) + ((outputTokens / 1_000_000) * p.output);
+
+          return { ...p, modelIters, totalTokens, cost };
+        }).sort((a, b) => a.cost - b.cost);
+
+        const cheapestApi = apiResults[0].cost;
+        const subEquiv = SUB_PLANS.map(plan => ({
+          plan: plan.name,
+          monthly: plan.monthly,
+          months: cheapestApi > 0 ? (cheapestApi / plan.monthly).toFixed(1) : 0
+        }));
+
+        renderResults(owner, repo, finalLoc, totalCommits, apiResults, subEquiv);
+
+      } catch (err) {
+        errorEl.textContent = err.message || 'Something went wrong. Check URL or API limits.';
+      } finally {
+        loading.style.display = 'none';
+      }
+    }
+
+    // Mathematical progression simulating AI dev growth over time
+    function calculateTokensOverTime(finalLoc, commits, itersPerCommit, contextPct, churnFactor, maxContextLines) {
+      if (commits === 0 || finalLoc === 0) return { inputTokens: 0, outputTokens: 0 };
+      
+      let totalInputTokens = 0;
+      const avgLinesAddedPerCommit = finalLoc / commits;
+
+      // Total code generated = Final size * Churn * Prompt Iterations
+      const totalOutputTokens = finalLoc * churnFactor * TOKENS_PER_LINE * itersPerCommit;
+
+      // Simulated timeline
+      for (let c = 1; c <= commits; c++) {
+        let currentRepoSize = c * avgLinesAddedPerCommit;
+        let linesInContext = Math.min(currentRepoSize * contextPct, maxContextLines);
+        
+        let inputTokensPerIteration = BASE_PROMPT_TOKENS + (linesInContext * TOKENS_PER_LINE);
+        totalInputTokens += (inputTokensPerIteration * itersPerCommit);
+      }
+
+      return { 
+        inputTokens: Math.round(totalInputTokens), 
+        outputTokens: Math.round(totalOutputTokens) 
+      };
+    }
+
+    function renderResults(owner, repo, loc, commits, apiResults, subEquiv) {
+      document.getElementById('result').innerHTML = `
+        <div class="section">
+          <h2>${owner}/${repo}</h2>
+          <div class="metrics-grid">
+            <div class="metric-card">
+              <div title="Weighted by language density">Est. Final SLOC</div>
+              <div class="metric-value">${loc.toLocaleString()}</div>
+            </div>
+            <div class="metric-card">
+              <div>Total Commits</div>
+              <div class="metric-value">${commits.toLocaleString()}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <h3>Raw API Cost (Performance-Adjusted)</h3>
+          <table>
+            <tr>
+              <th>Model</th>
+              <th>SWE-Bench</th>
+              <th title="Prompt retries required due to model intelligence">Avg Tries/Commit</th>
+              <th>Tokens Used</th>
+              <th>Est. Build Cost</th>
+            </tr>
+            ${apiResults.map(c => `
+              <tr>
+                <td><strong>${c.name}</strong></td>
+                <td>${c.sweBench}%</td>
+                <td>${c.modelIters.toFixed(1)}x</td>
+                <td>${(c.totalTokens / 1_000_000).toFixed(1)}M</td>
+                <td style="color: var(--primary); font-weight: bold;">$${c.cost.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits:2})}</td>
+              </tr>
+            `).join('')}
+          </table>
+        </div>
+
+        <div class="section">
+          <h3>Subscription Equivalency</h3>
+          <p style="font-size: 0.85rem; color: #888; margin-top: -10px;">Using cheapest viable API route (${apiResults[0].name})</p>
+          <table>
+            <tr><th>SaaS Plan</th><th>Monthly Price</th><th>Equivalent Cost Time</th></tr>
+            ${subEquiv.map(s => `<tr><td>${s.plan}</td><td>$${s.monthly}</td><td>${s.months} months</td></tr>`).join('')}
+          </table>
+        </div>
+
+        <div class="note">
+          <strong>How this works:</strong> Uses GitHub's language byte breakdowns mapped to language-specific densities to accurately estimate Source Lines of Code (SLOC). It then loops over every commit historically, simulating the growing context window size (capped via RAG limits).<br><br>
+          <em>The Stupidity Tax:</em> Less capable models get an iteration penalty based on SWE-Bench scores, severely increasing their input/output token usage because they require more prompting to get working code.
+        </div>
+      `;
+    }
+
+    // --- Helpers ---
+    function parseGitHubUrl(url) {
+      const match = url.match(/github\.com[\/:]([^\/]+)\/([^\/\.]+)/i);
+      if (!match) throw new Error('Invalid GitHub URL. Try: https://github.com/owner/repo');
+      return { owner: match[1], repo: match[2].replace('.git', '') };
+    }
+
+    async function fetchGitHub(endpoint) {
+      const res = await fetch(`${GITHUB_API_BASE}${endpoint}`, {
+        headers: { 'User-Agent': USER_AGENT, 'Accept': 'application/vnd.github.v3+json' }
+      });
+      if (!res.ok) {
+        if (res.status === 403) throw new Error('GitHub API Rate Limit Hit. Wait an hour.');
+        if (res.status === 404) throw new Error('Repo not found (or is private).');
+        throw new Error(`GitHub error: ${res.status}`);
+      }
+      return res;
+    }
+
+    async function getTotalCommits(owner, repo) {
+      const res = await fetchGitHub(`/repos/${owner}/${repo}/commits?per_page=1`);
+      const link = res.headers.get('link');
+      if (link) {
+        const last = link.match(/page=(\d+)>; rel="last"/);
+        if (last) return parseInt(last[1], 10);
+      }
+      const data = await res.json();
+      return Array.isArray(data) ? data.length : 0;
+    }
+
+    async function getLanguageBytes(owner, repo) {
+      const res = await fetchGitHub(`/repos/${owner}/${repo}/languages`);
+      return await res.json();
+    }
+
+    function estimateWeightedLoC(langBytes) {
+      let totalLines = 0;
+      for (const [lang, bytes] of Object.entries(langBytes)) {
+        const bpl = BYTES_PER_LINE[lang] || BYTES_PER_LINE['default'];
+        totalLines += Math.round(bytes / bpl);
+      }
+      return totalLines;
+    }
+  </script>
+</body>
+</html>
